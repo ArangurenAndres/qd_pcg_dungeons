@@ -1,0 +1,3 @@
+# qd_dungeon/requirements.txt
+numpy
+matplotlib
