@@ -1,3 +1,4 @@
-# qd_dungeon/requirements.txt
+flask
+gunicorn
 numpy
 matplotlib
