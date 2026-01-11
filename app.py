@@ -494,6 +494,43 @@ PAGE = r"""
   <h1>MAP-Elites + Self-adaptive ES (Dungeon PCG)</h1>
   <div class="muted">Descriptor: wall-density × path-length. Live progress updates are pushed every ~0.5s.</div>
 
+  <!-- ADD THIS BLOCK HERE -->
+  <div style="
+    margin-top: 12px;
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    font-size: 14px;
+    line-height: 1.55;
+  ">
+    <strong>What this app does.</strong>
+    This interactive demo runs a <em>Quality–Diversity</em> search (MAP-Elites) with
+    <em>self-adaptive Evolution Strategies</em> to generate a diverse archive of
+    <strong>playable 2D dungeon levels</strong>. Instead of optimizing a single “best” map,
+    the system discovers many distinct level styles across a behavior space
+    (wall density × path length).
+
+    <br><br>
+
+    <strong>How to use it.</strong>
+    Set the generation parameters on the left (grid size, iterations, mutation settings),
+    click <em>Run</em>, and monitor live progress on the right. The archive grows over time as
+    new behavioral niches are discovered.
+
+    <br><br>
+
+    <strong>What you get.</strong>
+    Once the run finishes, the app renders:
+    <ul style="margin:6px 0 0 18px;">
+      <li><strong>Top elites</strong>: highest-fitness levels from different niches</li>
+      <li><strong>Random elites</strong>: diverse samples across the archive</li>
+    </ul>
+    Each image represents a valid, solvable dungeon produced by the search.
+  </div>
+  <!-- END DESCRIPTION BLOCK -->
+
   <div class="row" style="margin-top: 14px;">
     <div class="card">
       <h3>Parameters</h3>
