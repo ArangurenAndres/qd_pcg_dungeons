@@ -4,8 +4,9 @@ import json
 import math
 import random
 import threading
+import pickle
 from dataclasses import dataclass
-from collections import deque
+from collections import deque, defaultdict
 from typing import Dict, Tuple, Optional, List
 
 import numpy as np
@@ -13,14 +14,10 @@ import matplotlib
 matplotlib.use("Agg")  # server-safe backend
 import matplotlib.pyplot as plt
 
-from flask import Flask, request, jsonify, send_from_directory, render_template_string
+from flask import Flask, request, jsonify, send_from_directory, render_template_string, abort
 
 # ============================================================
-# Core PCG / MAP-Elites code (UPDATED for higher coverage)
-#  - Descriptor: density x PATH-LENGTH
-#  - Mutation: self-adaptive sigma + occasional BLOCK mutation
-#  - Injection schedule: higher early, lower later
-#  - Coverage-biased parent selection
+# Core PCG / MAP-Elites code (Dungeon)
 # ============================================================
 
 WALL = "#"
@@ -319,7 +316,175 @@ def save_some_elites_as_png(archive, out_dir, k=10, mode="top", seed=0, tile_px=
 
 
 # ============================================================
-# Flask app: run job in background thread + poll progress
+# Narrative archive browsing (loads narrative_archive.pkl)
+# - This does NOT run narrative QD in Flask.
+# - It only loads a precomputed archive and renders it.
+# ============================================================
+
+NARRATIVE_ARCHIVE_PATH = os.path.join(os.path.dirname(__file__), "narrative_archive.pkl")
+
+
+def _load_narrative_archive():
+    if not os.path.exists(NARRATIVE_ARCHIVE_PATH):
+        raise FileNotFoundError(
+            f"Missing {os.path.basename(NARRATIVE_ARCHIVE_PATH)}. "
+            f"Generate it first (python run_narrative_qd.py) and keep it next to app.py."
+        )
+    with open(NARRATIVE_ARCHIVE_PATH, "rb") as f:
+        return pickle.load(f)
+
+
+def _narrative_shortest_path_text(g) -> str:
+    """
+    Fallback renderer that works even if you have not added domains/narrative/render.py yet.
+    Expected graph object shape:
+      g.scenes: dict[sid] with .stype, .location, .conflict, .text_seed
+      g.edges: list with .src, .dst, .label
+      g.start_id, g.end_id
+    """
+    adj = defaultdict(list)
+    for e in getattr(g, "edges", []):
+        adj[e.src].append((e.dst, getattr(e, "label", "")))
+
+    start = getattr(g, "start_id", None)
+    goal = getattr(g, "end_id", None)
+    if start is None or goal is None:
+        return "Invalid narrative graph: missing start_id/end_id."
+
+    q = deque([start])
+    parent = {start: None}
+    parent_label = {}
+
+    while q:
+        u = q.popleft()
+        if u == goal:
+            break
+        for v, lab in adj.get(u, []):
+            if v not in parent:
+                parent[v] = u
+                parent_label[v] = lab
+                q.append(v)
+
+    if goal not in parent:
+        return "Unsolvable story."
+
+    path = []
+    cur = goal
+    while cur is not None:
+        path.append(cur)
+        cur = parent[cur]
+    path.reverse()
+
+    lines = []
+    for i, sid in enumerate(path):
+        sc = g.scenes[sid]
+        prefix = "START" if sid == start else ("END" if sid == goal else f"S{i}")
+        lines.append(f"{prefix}: [{sc.stype}] in {sc.location}, conflict={sc.conflict}. {sc.text_seed}")
+        if i < len(path) - 1:
+            nxt = path[i + 1]
+            # edge label stored by child node
+            lab = parent_label.get(nxt, "")
+            if lab:
+                lines.append(f"  Choice: {lab}")
+    return "\n".join(lines)
+
+
+NARRATIVE_PAGE = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Narrative MAP-Elites</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; max-width: 1200px; }
+    a { color: #111; }
+    .muted { color:#666; font-size: 13px; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    td { width: 18px; height: 18px; border: 1px solid #e5e7eb; padding: 0; }
+    td a { display: block; width: 100%; height: 100%; text-decoration: none; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap: 12px; }
+    .pill { font-size: 12px; padding: 6px 10px; border-radius: 999px; background: #f3f4f6; border: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div>
+      <h2 style="margin:0;">Narrative MAP-Elites</h2>
+      <div class="muted">Browse a precomputed narrative archive (repertoire). Click a filled cell to view an elite story.</div>
+    </div>
+    <div class="pill">
+      <a href="/">Back to dungeon demo</a>
+    </div>
+  </div>
+
+  <div style="margin-top:10px;" class="pill">
+    coverage={{ "%.1f"|format(coverage*100) }}% ,
+    qd={{ "%.1f"|format(qd) }} ,
+    evals={{ evals }}
+    <span class="muted"> | x: branching (binned), y: tension variability (binned)</span>
+  </div>
+
+  <table>
+    {% for y in range(h) %}
+      <tr>
+        {% for x in range(w) %}
+          {% set e = grid[y][x] %}
+          {% if e is none %}
+            <td></td>
+          {% else %}
+            {% set t = 0.0 %}
+            {% if fmax > fmin %}
+              {% set t = (e.fitness - fmin) / (fmax - fmin) %}
+            {% endif %}
+            {% set shade = (255 - (t * 180))|int %}
+            <td style="background: rgb({{ shade }}, {{ shade }}, 255);">
+              <a href="/narrative/{{ x }}/{{ y }}" title="fit={{ '%.2f'|format(e.fitness) }}"></a>
+            </td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
+"""
+
+NARRATIVE_CELL_PAGE = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Elite {{x}},{{y}}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; max-width: 1100px; }
+    a { color:#111; }
+    .muted { color:#666; font-size: 13px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 10px; border: 1px solid #e5e7eb; overflow-x: auto; }
+    .pill { font-size: 12px; padding: 6px 10px; border-radius: 999px; background: #f3f4f6; border: 1px solid #e5e7eb; display:inline-block; }
+    .row { display:flex; gap: 12px; flex-wrap: wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div class="pill"><a href="/narrative">Back to archive</a></div>
+    <div class="pill"><a href="/">Back to dungeon demo</a></div>
+  </div>
+
+  <h2 style="margin-top: 14px;">Elite at ({{x}}, {{y}})</h2>
+  <div class="muted">fitness={{ "%.3f"|format(fitness) }}</div>
+
+  <h3>Meta</h3>
+  <pre>{{ meta }}</pre>
+
+  <h3>Shortest path story</h3>
+  <pre>{{ story }}</pre>
+</body>
+</html>
+"""
+
+
+# ============================================================
+# Flask app: run dungeon job in background thread + poll progress
 # ============================================================
 
 app = Flask(__name__)
@@ -386,7 +551,7 @@ def run_map_elites_job(params: dict, run_id: str):
 
         keys = list(archive.keys())
 
-        # ---- IMPORTANT: time-based UI pushing (prevents "frozen" UI) ----
+        # time-based UI pushing
         last_ui_push = time.time()
 
         for t in range(1, iters + 1):
@@ -406,7 +571,6 @@ def run_map_elites_job(params: dict, run_id: str):
                     archive[b] = (ev.fitness, child, ev)
                     keys = list(archive.keys())
 
-            # UI updates: iteration-based OR time-based
             now = time.time()
             should_push = (t % log_every == 0) or (t == iters) or ((now - last_ui_push) > 0.5)
             if should_push:
@@ -488,13 +652,21 @@ PAGE = r"""
     img { width: 100%; border-radius: 10px; border: 1px solid #ddd; }
     .muted { color:#666; font-size: 13px; }
     .error { color: #b00020; font-weight: 600; }
+    .pill { font-size: 12px; padding: 6px 10px; border-radius: 999px; background: #f3f4f6; border: 1px solid #e5e7eb; display:inline-block; }
+    a { color:#111; }
   </style>
 </head>
 <body>
-  <h1>MAP-Elites + Self-adaptive ES (Dungeon PCG)</h1>
-  <div class="muted">Descriptor: wall-density × path-length. Live progress updates are pushed every ~0.5s.</div>
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+    <div>
+      <h1 style="margin:0;">MAP-Elites + Self-adaptive ES (Dungeon PCG)</h1>
+      <div class="muted">Descriptor: wall-density × path-length. Live progress updates are pushed every ~0.5s.</div>
+    </div>
+    <div class="pill">
+      <a href="/narrative">Open narrative archive</a>
+    </div>
+  </div>
 
-  <!-- ADD THIS BLOCK HERE -->
   <div style="
     margin-top: 12px;
     margin-bottom: 18px;
@@ -506,9 +678,9 @@ PAGE = r"""
     line-height: 1.55;
   ">
     <strong>What this app does.</strong>
-    This interactive demo runs a <em>Quality–Diversity</em> search (MAP-Elites) with
+    This interactive demo runs a <em>Quality Diversity</em> search (MAP-Elites) with
     <em>self-adaptive Evolution Strategies</em> to generate a diverse archive of
-    <strong>playable 2D dungeon levels</strong>. Instead of optimizing a single “best” map,
+    <strong>playable 2D dungeon levels</strong>. Instead of optimizing a single best map,
     the system discovers many distinct level styles across a behavior space
     (wall density × path length).
 
@@ -529,7 +701,6 @@ PAGE = r"""
     </ul>
     Each image represents a valid, solvable dungeon produced by the search.
   </div>
-  <!-- END DESCRIPTION BLOCK -->
 
   <div class="row" style="margin-top: 14px;">
     <div class="card">
@@ -749,6 +920,67 @@ def runs_static(run_id, filename):
     return send_from_directory(directory, filename)
 
 
+# ============================================================
+# Narrative browsing routes
+# ============================================================
+
+@app.route("/narrative")
+def narrative_home():
+    try:
+        arc = _load_narrative_archive()
+    except Exception as e:
+        # Render a very small error page with a direct instruction
+        return render_template_string(
+            "<h2>Narrative archive missing</h2>"
+            "<p style='font-family: system-ui;'>"
+            "I could not load <code>narrative_archive.pkl</code> next to <code>app.py</code>.<br>"
+            "Generate it first, then refresh this page.<br><br>"
+            f"Error: <pre>{str(e)}</pre>"
+            "</p>"
+            "<p><a href='/'>Back</a></p>"
+        )
+
+    grid = arc.grid
+    fits = [e.fitness for row in grid for e in row if e is not None]
+    fmin, fmax = (min(fits), max(fits)) if fits else (0.0, 1.0)
+
+    return render_template_string(
+        NARRATIVE_PAGE,
+        w=arc.w,
+        h=arc.h,
+        grid=grid,
+        fmin=fmin,
+        fmax=fmax,
+        coverage=arc.coverage(),
+        qd=arc.qd_score(),
+        evals=getattr(arc, "evals", 0),
+    )
+
+
+@app.route("/narrative/<int:x>/<int:y>")
+def narrative_cell(x: int, y: int):
+    arc = _load_narrative_archive()
+
+    if not (0 <= x < arc.w and 0 <= y < arc.h):
+        abort(404)
+
+    elite = arc.grid[y][x]
+    if elite is None:
+        abort(404)
+
+    g = elite.item
+    story = _narrative_shortest_path_text(g)
+
+    return render_template_string(
+        NARRATIVE_CELL_PAGE,
+        x=x,
+        y=y,
+        fitness=float(elite.fitness),
+        meta=str(elite.meta),
+        story=story,
+    )
+
+
 if __name__ == "__main__":
     # IMPORTANT: disable reloader, otherwise the background thread may run in a different process
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=True, use_reloader=False,port=5001)
