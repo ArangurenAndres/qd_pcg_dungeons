@@ -9,7 +9,7 @@ from domains.narrative.evaluate import evaluate
 
 def run(
     seed: int = 0,
-    iters: int = 50000,
+    iters: int = 60000,
     w: int = 20,
     h: int = 20,
     out_path: str | None = None,
@@ -22,7 +22,7 @@ def run(
 
     # Bootstrap
     for _ in range(400):
-        g = make_initial_graph(rng, n_scenes=rng.randint(5, 10))
+        g = make_initial_graph(rng, n_scenes=rng.randint(10, 18))
         fit, desc, meta = evaluate(g, w=w, h=h)
         archive.add(g, fit, desc, meta)
         archive.evals += 1
@@ -49,4 +49,4 @@ def run(
     print("Saved:", out_path)
 
 if __name__ == "__main__":
-    run()
+    run(seed=7, iters=60000, w=30, h=30)
