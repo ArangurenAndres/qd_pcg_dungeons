@@ -706,7 +706,7 @@ PAGE = r"""
     <div class="card">
       <h3>Parameters</h3>
 
-      <label>Iters</label><input id="iters" type="number" value="100000"/>
+      <label>Iters</label><input id="iters" type="number" value="5000"/>
 
       <div class="row">
         <div style="flex:1;">
